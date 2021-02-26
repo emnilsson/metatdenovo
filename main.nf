@@ -57,13 +57,13 @@ if (params.input_paths) {
             .from(params.input_paths)
             .map { row -> [ row[0], [ file(row[1][0], checkIfExists: true) ] ] }
             .ifEmpty { exit 1, "params.input_paths was empty - no input files supplied" }
-            .into { ch_read_files_fastqc; ch_read_files_trimming }
+            .into { ch_read_files_fastqc; ch_read_files_remove_rrna }
     } else {
         Channel
             .from(params.input_paths)
             .map { row -> [ row[0], [ file(row[1][0], checkIfExists: true), file(row[1][1], checkIfExists: true) ] ] }
             .ifEmpty { exit 1, "params.input_paths was empty - no input files supplied" }
-            .into { ch_read_files_fastqc; ch_read_files_trimming }
+            .into { ch_read_files_fastqc; ch_read_files_remove_rrna }
     }
 } else {
     Channel
@@ -233,6 +233,26 @@ process output_documentation {
         """
         markdown_to_html.py $output_docs -o results_description.html
         """
+}
+
+/*
+ * STEP 4 - Remove rRNA-sequences
+ */
+process remove_rrna {
+    label 'process_medium'
+    tag "$name"
+
+    publishDir("${params.outdir}/remove_rrna_logs/", mode: "copy", pattern: "*.bbduk.log")
+
+    input:
+        tuple name, file(reads) from ch_read_files_remove_rrna
+
+    output:
+        file("bbduk/*.fq.gz") into ch_read_files_trimming
+
+    """
+    bbduk.sh in1=${reads[0]} in2=${reads[1]} out1=bbduk/${reads[0]} out2=bbduk/${reads[1]} ref=$params.rrnafasta k=31 2>&1 > ${name}.bbduk.log
+    """
 }
 
 /*
