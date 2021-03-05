@@ -11,7 +11,7 @@
 
 def json_schema = "$projectDir/nextflow_schema.json"
 if (params.help) {
-    def command = "nextflow run nf-core/metatdenovo --input 'reads/*_R{1,2}*.fastq.gz' --megahit -profile docker"
+    def command = "nextflow run nf-core/metatdenovo --input 'reads/*_R{1,2}*.fastq.gz' --assembler megahit -profile docker"
     log.info Schema.params_help(workflow, params, json_schema, command)
     exit 0
 }
@@ -21,8 +21,29 @@ if (params.help) {
  */
 
 params.outdir = 'results/'
-params.megahit = false // Run, or not, megahit assembly
-params.trinity = false // Run, or not, trinity assembly
+
+// Assembly program
+ASSEMBLERS = [ megahit: true, trinity: true ]
+params.assembler = '' // Set to megahit or trinity to be meaningful
+
+// Modify when we start to support starting from an already finished assembly
+if ( ! ASSEMBLERS[params.assembler.toLowerCase()] ) {
+    println "You must choose a supported assembly program: ${ASSEMBLERS.keySet().join(', ')}"
+    exit 1
+}
+
+// Annotation/gene calling program
+ANNOTATORS = [ prokka: true, trinotate: true ]
+params.annotator = '' // Set to prokka or trinotate to be meaningful
+
+// Modify when we start to support starting from an already finished assembly
+if ( ! ANNOTATORS[params.annotator.toLowerCase()] ) {
+    println "You must choose a supported annotation program: ${ANNOTATORS.keySet().join(', ')}"
+    exit 1
+}
+
+// Turn bbmap false when skip_bbmap set to true, else keep the value
+params.bbmap = params.skip_bbmap ? false : params.bbmap
 
 // Has the run name been specified by the user?
 // this has the bonus effect of catching both -name and --name
@@ -48,6 +69,12 @@ ch_multiqc_custom_config = params.multiqc_config ? Channel.fromPath(params.multi
 ch_output_docs = file("$projectDir/docs/output.md", checkIfExists: true)
 ch_output_docs_images = file("$projectDir/docs/images/", checkIfExists: true)
 
+if ( params.megan_taxonomy ) {
+    ch_megan_acc2taxa        = Channel.fromPath(params.megan_acc2taxa_map,        checkIfExists: true)
+    ch_megan_acc2eggnog      = Channel.fromPath(params.megan_acc2eggnog_map,      checkIfExists: true)
+    ch_megan_acc2interpro2go = Channel.fromPath(params.megan_acc2interpro2go_map, checkIfExists: true)
+}
+
 /*
  * Create a channel for input read files
  */
@@ -57,19 +84,19 @@ if (params.input_paths) {
             .from(params.input_paths)
             .map { row -> [ row[0], [ file(row[1][0], checkIfExists: true) ] ] }
             .ifEmpty { exit 1, "params.input_paths was empty - no input files supplied" }
-            .into { ch_read_files_fastqc; ch_read_files_remove_rrna }
+            .into { ch_read_files_fastqc; ch_read_files_remove_rrna; ch_read_files_bbmap }
     } else {
         Channel
             .from(params.input_paths)
             .map { row -> [ row[0], [ file(row[1][0], checkIfExists: true), file(row[1][1], checkIfExists: true) ] ] }
             .ifEmpty { exit 1, "params.input_paths was empty - no input files supplied" }
-            .into { ch_read_files_fastqc; ch_read_files_remove_rrna }
+            .into { ch_read_files_fastqc; ch_read_files_remove_rrna; ch_read_files_bbmap }
     }
 } else {
     Channel
         .fromFilePairs(params.input, size: params.single_end ? 1 : 2)
         .ifEmpty { exit 1, "Cannot find any reads matching: ${params.input}\nNB: Path needs to be enclosed in quotes!\nIf this is single-end data, please specify --single_end on the command line." }
-        .into { ch_read_files_fastqc; ch_read_files_trimming }
+        .into { ch_read_files_fastqc; ch_read_files_trimming; ch_read_files_bbmap }
 }
 
 // Header log info
@@ -139,6 +166,7 @@ process get_software_versions {
         file 'software_versions_mqc.yaml' into ch_software_versions_yaml
         file "software_versions.csv"
 
+    // TODO: Fill in prokka, eggnog-mapper and ...
     script:
         """
         echo $workflow.manifest.version > v_pipeline.txt
@@ -280,7 +308,8 @@ if ( ! params.skip_trimming ) {
         trim_galore --paired --fastqc --gzip --quality 20 $reads 2>&1 > ${name}.trim_galore.log
         """
     }
-} else {
+} 
+else {
     // This is perhaps not the best way, but I couldn't come up with anything else
     // that gathered all forward reads in one channel and all reverse in another.
     process skip_trimming {
@@ -304,86 +333,349 @@ if ( ! params.skip_trimming ) {
 /*
  * STEP 5a - Megahit assembly
  */
-process megahit {
-    label 'process_high'
-    publishDir("${params.outdir}/megahit", mode: "copy")
+if ( params.assembler.toLowerCase() == 'megahit' ) {
+    process megahit {
+        label 'process_high'
+        publishDir("${params.outdir}/megahit", mode: "copy")
 
-    when:
-        params.megahit
+        input:
+            file(fwdreads) from trimmed_fwdreads_megahit.collect()
+            file(revreads) from trimmed_revreads_megahit.collect()
 
-    input:
-        file(fwdreads) from trimmed_fwdreads_megahit.collect()
-        file(revreads) from trimmed_revreads_megahit.collect()
+        output:
+            file "megahit.final.contigs.fna.gz" into ch_transdecoder
+            file "megahit.final.contigs.fna.gz" into ch_prokka
+            file "megahit.final.contigs.fna.gz" into ch_contigs_bbmap
+            file "megahit.log"
+            file "megahit.tar.gz"
 
-    output:
-        file "megahit.final.contigs.fna.gz" into ch_trinotate_transdecoder
-        file "megahit.log"
-        file "megahit.tar.gz"
-
-    script:
-        """
-        megahit -t ${task.cpus} -1 ${fwdreads.sort().join(',')} -2 ${revreads.sort().join(',')} > megahit.log 2>&1
-        cp megahit_out/final.contigs.fa megahit.final.contigs.fna
-        pigz -p ${task.cpus} megahit.final.contigs.fna
-        tar cfz megahit.tar.gz megahit_out/
-        """
+        script:
+            """
+            megahit -t ${task.cpus} -m ${task.memory.toBytes()} -1 ${fwdreads.sort().join(',')} -2 ${revreads.sort().join(',')} > megahit.log 2>&1
+            cp megahit_out/final.contigs.fa megahit.final.contigs.fna
+            pigz -p ${task.cpus} megahit.final.contigs.fna
+            tar cfz megahit.tar.gz megahit_out/
+            """
+    }
 }
 
 /*
  * STEP 5b - Trinity assembly
  */
-process trinity {
-    label 'process_high'
-    publishDir("${params.outdir}/trinity", mode: "copy")
+if ( params.assembler.toLowerCase() == 'trinity' ) {
+    process trinity {
+        label 'process_high'
+        publishDir("${params.outdir}/trinity", mode: "copy")
 
-    when:
-        params.trinity
+        input:
+            file(fwdreads) from trimmed_fwdreads_trinity.collect()
+            file(revreads) from trimmed_revreads_trinity.collect()
 
-    input:
-        file(fwdreads) from trimmed_fwdreads_trinity.collect()
-        file(revreads) from trimmed_revreads_trinity.collect()
+        output:
+            file "trinity.final.contigs.fna.gz" into ch_transdecoder
+            file "trinity.final.contigs.fna.gz" into ch_prokka
+            file "trinity.final.contigs.fna.gz" into ch_contigs_bbmap
+            file "trinity.log"
+            file "trinity.tar.gz"
 
-    output:
-        file "trinity.final.contigs.fna.gz" //into ch_trinotate_transdecoder // Can't use the same name for channels yet; wait 'til DSL2?
-        file "trinity.log"
-        file "trinity.tar.gz"
-
-    script:
-        """
-        unpigz -c -p ${task.cpus} ${fwdreads.sort().join(' ')} > fwdreads.fastq
-        unpigz -c -p ${task.cpus} ${revreads.sort().join(' ')} > revreads.fastq
-        Trinity --CPU ${task.cpus} --seqType fq --max_memory \$(echo ${task.memory}|sed 's/ *GB/G/') --left fwdreads.fastq --right revreads.fastq > trinity.log 2>&1
-        cp trinity_out_dir/Trinity.fasta trinity.final.contigs.fna
-        pigz -p ${task.cpus} trinity.final.contigs.fna
-        tar cfz trinity.tar.gz trinity_out_dir/
-        """
+        script:
+            """
+            unpigz -c -p ${task.cpus} ${fwdreads.sort().join(' ')} > fwdreads.fastq
+            unpigz -c -p ${task.cpus} ${revreads.sort().join(' ')} > revreads.fastq
+            Trinity --CPU ${task.cpus} --seqType fq --max_memory ${task.memory.toGiga()}G --left fwdreads.fastq --right revreads.fastq > trinity.log 2>&1
+            cp trinity_out_dir/Trinity.fasta trinity.final.contigs.fna
+            pigz -p ${task.cpus} trinity.final.contigs.fna
+            tar cfz trinity.tar.gz trinity_out_dir/
+            """
+    }
 }
 
 /*
- * STEP 6a.1 - Annotation with Trinotate: ORF calling with TransDecoder.*
+ * STEP 6a Annotation with Prokka
  */
-process trinotate_transdecoder {
-    label 'process_medium'
-    publishDir("${params.outdir}/trinotate", mode: "copy")
+if ( params.annotator.toLowerCase() == 'prokka' ) {
+    process prokka {
+        label 'process_high'
+        publishDir("${params.outdir}", mode: "copy")
+
+        input:
+            file contigs from ch_prokka
+
+        output:
+            file 'prokka/*.err.gz'
+            file 'prokka/*.faa.gz' into ch_emapper
+            file 'prokka/*.faa.gz' into ch_diamond_refseq
+            file 'prokka/*.ffn.gz'
+            file 'prokka/*.fna.gz'
+            file 'prokka/*.fsa.gz'
+            file 'prokka/*.gbk.gz'
+            file 'prokka/*.gff.gz' into ch_gff_bbmap
+            file 'prokka/*.log.gz'
+            file 'prokka/*.sqn.gz'
+            file 'prokka/*.tbl.gz'
+            file 'prokka/*.tsv.gz'
+            file 'prokka/*.txt.gz'
+            val  'ID'              into ch_id_bbmap
+
+        script:
+            prefix = contigs.toString() - '.fna.gz'
+            """
+            unpigz -c -p $task.cpus $contigs > contigs.fna
+            prokka --cpus $task.cpus --outdir prokka --prefix $prefix contigs.fna
+            pigz -p $task.cpus prokka/*
+            """
+    }
+} 
+
+/*
+ * STEP 6b ORF calling with TransDecoder.*
+ */
+if ( params.annotator.toLowerCase() == 'trinotate' ) {
+    process transdecoder {
+        label 'process_medium'
+        publishDir("${params.outdir}/trinotate", mode: "copy")
+
+        input:
+            file contigs from ch_transdecoder
+
+        output:
+            file '*.transdecoder.faa.gz'  into ch_emapper
+            file '*.transdecoder.faa.gz'  into ch_diamond_refseq
+            file '*.transdecoder.gff3.gz' into ch_gff_bbmap
+            file '*.transdecoder.bed.gz'
+            file '*.transdecoder.fna.gz'
+            val  'ID'                     into ch_id_bbmap
+
+        script:
+            """
+            TransDecoder.LongOrfs -t $contigs
+            TransDecoder.Predict -t $contigs
+            mv *.pep \$(basename *.pep .pep).faa
+            mv *.cds \$(basename *.cds .cds).fna
+            pigz -p $task.cpus *.transdecoder.*
+            """
+    }
+}
+
+/*
+ * STEP 6 - EGGNOG-mapper.
+ */
+if ( params.emapper && ! params.eggnogdb ) {
+    process download_eggnogdb {
+        label 'process_long'
+        publishDir("${params.outdir}/eggnogdb", mode: "copy")
+
+        output:
+            path 'eggnog.db'            into ch_eggnogdb
+            path 'eggnog.taxa.db'       into ch_eggnog_taxa
+            path 'eggnog_proteins.dmnd' into ch_eggnog_proteins
+
+        script:
+            """
+            download_eggnog_data.py --data_dir . -y
+            """
+    }
+} else if ( params.emapper ) {
+    ch_eggnogdb        = Channel.fromPath("$params.eggnogdb/eggnog.db",            checkIfExists: true)
+    ch_eggnog_proteins = Channel.fromPath("$params.eggnogdb/eggnog_proteins.dmnd", checkIfExists: true)
+    ch_eggnog_taxa     = Channel.fromPath("$params.eggnogdb/eggnog.taxa.db",       checkIfExists: true)
+    ch_dwnl_eggnog = Channel.empty()
+} 
+
+
+if ( params.emapper ) {
+    process emapper {
+        label 'process_high'
+        publishDir("${params.outdir}/emapper", mode: "copy")
+
+        input:
+            file orfs            from ch_emapper
+            file eggnogdb        from ch_eggnogdb
+            file eggnog_proteins from ch_eggnog_proteins
+            file eggnog_taxa     from ch_eggnog_taxa
+
+        output:
+            file 'emapper.out'
+            file '*.emapper.annotations'
+            file '*.emapper.seed_orthologs'
+
+        script:
+            prefix = orfs.toString() - '.faa'
+            """
+            which emapper.py
+            emapper.py --cpu ${task.cpus} --data_dir . -i $orfs --output $prefix 2>&1 > emapper.out
+            """
+    }
+}
+
+/*
+ * STEP 7 - Taxonomic annotation with Diamond/RefSeq and MEGAN.
+ */
+if ( params.megan_taxonomy ) {
+    if ( ! params.refseq_dmnd && params.refseq_faa ) {
+        ch_refseq_faa  = Channel.fromPath(params.refseq_faa, checkIfExists: true)
+
+        process refseq_dmnd {
+            label 'process_medium'
+            publishDir("${params.outdir}/refseq", mode: "copy")
+
+            input:
+                file refseq_faa from ch_refseq_faa
+
+            output:
+                file 'refseq_protein.dmnd' into ch_refseq_dmnd
+
+            script:
+                if ( refseq_faa.getExtension() == 'gz' ) {
+                    """
+                    gunzip -c $refseq_faa | diamond makedb -d refseq_protein --threads $task.cpus
+                    """
+                } 
+                else if ( refseq_faa.getExtension() == 'bz2' ) {
+                    """
+                    bunzip2 -c $refseq_faa | diamond makedb -d refseq_protein --threads $task.cpus
+                    """
+                } 
+                else {
+                    """
+                    diamond makedb --in $refseq_faa -d refseq_protein --threads $task.cpus
+                    """
+                }
+        }
+    } 
+    else if ( params.refseq_dmnd ) {
+        ch_refseq_dmnd = Channel.fromPath(params.refseq_dmnd,  checkIfExists: true)
+    } 
+    else if ( ! params.refseq_faa ) {
+        process download_refseq {
+            label 'process_long'
+            publishDir("${params.outdir}/refseq", mode: "copy")
+
+            output:
+                path 'refseq_protein.faa' into ch_refseq_faa
+
+            script:
+                """
+                wget -A "refseq_protein.*.tar.gz" --mirror ftp://ftp.ncbi.nih.gov/blast/db
+                ( cd ftp.ncbi.nih.gov/blast/db; for f in refseq_protein.*.tar.gz; do echo "--> untarring \$f <--"; tar xzf \$f; done )
+                blastdbcmd -db ftp.ncbi.nih.gov/blast/db/refseq_protein -entry all -dbtype prot -out refseq_protein.faa
+                """
+        }
+    }
+
+    process diamond_refseq {
+        label 'process_high'
+        publishDir("${params.outdir}/diamond-megan", mode: "copy")
+
+        input:
+            file orfs from ch_diamond_refseq
+            file db   from ch_refseq_dmnd
+
+        output:
+            file '*.refseq.daa' into ch_refseq_daa
+
+        script:
+            """
+            diamond blastp --threads $task.cpus -f 100 -d ${db.baseName} --query $orfs -o ${orfs.baseName}.refseq.daa
+            """
+    }
+
+    process meganize {
+        label 'process_low'
+        publishDir("${params.outdir}/diamond-megan", mode: "copy")
+
+        input:
+            file daa             from ch_refseq_daa
+            file acc2taxa        from ch_megan_acc2taxa
+            file acc2eggnog      from ch_megan_acc2eggnog
+            file acc2interpro2go from ch_megan_acc2interpro2go
+
+        output:
+            path('*.abin', includeInputs: true)
+            file daa into ch_meganized_daa
+
+        script:
+            unzip  = ( acc2taxa.getExtension()        == 'zip' ) ? "unzip $acc2taxa" : ""
+            unzip += ( acc2eggnog.getExtension()      == 'zip' ) ? "; unzip $acc2eggnog" : ""
+            unzip += ( acc2interpro2go.getExtension() == 'zip' ) ? "; unzip $acc2interpro2go" : ""
+            """
+            $unzip
+            /opt/conda/envs/nf-core-metatdenovo-1.0dev/opt/megan-6.12.3/tools/daa-meganizer \
+              --in $daa \
+              --longReads \
+              --acc2taxa ${acc2taxa.toString() - '.zip'} \
+              --acc2eggnog ${acc2eggnog.toString() - '.zip'} \
+              --acc2interpro2go ${acc2interpro2go.toString() - '.zip'}
+            """
+    }
+
+    process megan_export {
+        label 'process_low'
+        publishDir("${params.outdir}/diamond-megan", mode: "copy")
+
+        input:
+            file daa             from ch_meganized_daa
+
+        output:
+            file '*.tsv.gz'
+
+        script:
+            """
+            /opt/conda/envs/nf-core-metatdenovo-1.0dev/opt/megan-6.12.3/tools/daa2info -i $daa -r2c Taxonomy    | gzip -c > ${daa.toString() - '.daa'}.reads2taxonids.tsv.gz
+            /opt/conda/envs/nf-core-metatdenovo-1.0dev/opt/megan-6.12.3/tools/daa2info -i $daa -r2c EGGNOG      | gzip -c > ${daa.toString() - '.daa'}.reads2eggnogs.tsv.gz
+            /opt/conda/envs/nf-core-metatdenovo-1.0dev/opt/megan-6.12.3/tools/daa2info -i $daa -r2c INTERPRO2GO | gzip -c > ${daa.toString() - '.daa'}.reads2ip2go.tsv.gz
+            """
+    }
+}
+
+/*
+ * STEP 8a - quantification with BBMap
+ */
+process bbmap {
+    label 'process_high'
+    tag "$name"
+    publishDir("${params.outdir}/bbmap", mode: "copy")
 
     when:
-        params.trinotate
+        params.bbmap
 
     input:
-        file contigs from ch_trinotate_transdecoder
+        path contigs from ch_contigs_bbmap
+        tuple name, file(reads) from ch_read_files_bbmap
 
     output:
-        file '*.transdecoder.faa'
-        file '*.transdecoder.gff3'
-        file '*.transdecoder.bed'
-        file '*.transdecoder.fna'
+        path "${name}.bbmap.bam" into ch_bbmap_bam
+        path "${name}.bbmap.out"
+        //path '*.bai'
+
+    script:
+        // The trimreaddescriptions=t is required by featureCount
+        """
+        bbmap.sh trimreaddescriptions=t unpigz=t threads=$task.cpus nodisk=t ref=$contigs in=${reads[0]} in2=${reads[1]} out=stdout 2>${name}.bbmap.out | samtools view -Sb | samtools sort > ${name}.bbmap.bam
+        """
+}
+
+process bbmap_feature_count {
+    label 'process_high'
+    publishDir("${params.outdir}/bbmap", mode: "copy")
+
+    when:
+        params.bbmap
+
+    input:
+        val  id   from ch_id_bbmap
+        path gff  from ch_gff_bbmap
+        path bams from ch_bbmap_bam.collect()
+
+    output:
+        path 'bbmap.fc.CDS.tsv.gz'
+        path 'bbmap.fc.out'
 
     script:
         """
-        TransDecoder.LongOrfs -t $contigs
-        TransDecoder.Predict -t $contigs
-        mv *.pep \$(basename *.pep .pep).faa
-        mv *.cds \$(basename *.cds .cds).fna
+        unpigz -c -p $task.cpus $gff > ${gff.baseName}
+        featureCounts -T $task.cpus -t CDS -g $id -a ${gff.baseName} $bams -o bbmap.fc.CDS.tsv 2>&1 > bbmap.fc.out
+        pigz -p $task.cpus bbmap.fc.CDS.tsv
         """
 }
 
@@ -549,4 +841,4 @@ def checkHostname() {
     }
 }
 
-// wim:sw=4
+// vim:sw=4

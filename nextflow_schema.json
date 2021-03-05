@@ -38,30 +38,83 @@
                     "fa_icon": "fas fa-envelope",
                     "help_text": "Set this parameter to your e-mail address to get a summary e-mail with details of the run sent to you when the workflow exits. If set in your user config file (`~/.nextflow/config`) then you don't need to specify this on the command line for every run.",
                     "pattern": "^([a-zA-Z0-9_\\-\\.]+)@([a-zA-Z0-9_\\-\\.]+)\\.([a-zA-Z]{2,5})$"
-                },
-                "megahit": {
-                    "type": "boolean",
-                    "description": "Run assembly with Megahit.",
-                    "help_text": "Set this parameter to use the Megahit assembly program. Suitable for prokaryotic metatranscriptomes."
-                },
-                "trinity": {
-                    "type": "boolean",
-                    "description": "Run assembly with Trinity.",
-                    "help_text": "Set this parameter to use the Trinity assembly program. Suitable for eukaryotic metatranscriptomes.\nThis is currently done in an unsophisticated way, using the default command found here:\n\nhttps://github.com/trinityrnaseq/trinityrnaseq/wiki."
                 }
             }
         },
-        "reference_genome_options": {
-            "title": "Reference genome options",
+        "processing_options": {
+            "title": "Processing options",
+            "type": "object",
+            "description": "",
+            "default": "",
+            "properties": {
+                "assembler": {
+                    "type": "string",
+                    "description": "Which assembly program to use: megahit or trinity.",
+                    "help_text": "Set this parameter to either 'megahit' or 'trinity'."
+                },
+                "annotator": {
+                    "type": "string",
+                    "description": "Main annotator to call ORFs and annotate contigs, either 'prokka' or 'trinotate' (the latter only partly supported)."
+                },
+                "emapper": {
+                    "type": "boolean",
+                    "description": "Run the EGGNOG mapper"
+                },
+                "megan_taxonomy": {
+                    "type": "boolean",
+                    "description": "Run taxonomy assignment via RefSeq Diamond followed by Megan classification. Note the refseq_dmnd and refseq_daa options below. Without them, RefSeq will be downloaded and placed in the results directory.",
+                    "help_text": "Run taxonomy assignment via RefSeq Diamond followed by Megan classification.",
+                    "default": true
+                },
+                "bbmap": {
+                    "type": "boolean",
+                    "description": "UseBBMap to quantify ORs over samples",
+                    "default": true
+                }
+            }
+        },
+        "reference_database_options": {
+            "title": "Reference database options",
             "type": "object",
             "fa_icon": "fas fa-dna",
-            "description": "Options for the reference genome indices used to align reads.",
+            "description": "Options for reference databases for various processing steps.",
             "properties": {
                 "rrnafasta": {
                     "type": "string",
                     "fa_icon": "fas fa-font",
                     "description": "Path to FASTA file with rRNA sequences to remove from input sequences before assembly.",
                     "help_text": "Path to FASTA file with rRNA sequences to remove from input sequences before assembly."
+                },
+                "eggnogdb": {
+                    "type": "string",
+                    "default": "eggnogdb",
+                    "description": "Path to database files for EGGNOG-mapper.",
+                    "help_text": "Path to database files for EGGNOG-mapper. If left out, and --emapper specified, *large* databases will be downloaded. Database files will be saved in the eggnogdb directory of the result directory for later use."
+                },
+                "refseq_dmnd": {
+                    "type": "string",
+                    "description": "Path to RefSeq db in Diamond format",
+                    "help_text": "Path to RefSeq db in Diamond format. Without this option, a Diamond database will be built from a FASTA file, downloaded or specified via --refseq_fasta."
+                },
+                "refseq_faa": {
+                    "type": "string",
+                    "description": "Path to RefSeq db in FASTA format",
+                    "help_text": "Path to RefSeq db in FASTA format. Without this option, or --refseq_dmnd, RefSeq will be downloaded in FASTA format and formated to Diamond format. Both files will be placed in the results directory."
+                },
+                "megan_acc2taxa_map": {
+                    "type": "string",
+                    "description": "Mapping file for taxonomy for MEGAN. (Old, pre ~6.20 style.)",
+                    "default": "https://software-ab.informatik.uni-tuebingen.de/download/megan6/prot_acc2tax-Jul2019X1.abin.zip"
+                },
+                "megan_acc2eggnog_map": {
+                    "type": "string",
+                    "description": "Mapping file for EGGNOGs for MEGAN. (Old, pre ~6.20 style.)",
+                    "default": "https://software-ab.informatik.uni-tuebingen.de/download/megan6/acc2eggnog-Jul2019X.abin.zip"
+                },
+                "megan_acc2interpro2go_map": {
+                    "type": "string",
+                    "description": "Mapping file for Interpro2GO for MEGAN. (Old, pre ~6.20 style.)",
+                    "default": "https://software-ab.informatik.uni-tuebingen.de/download/megan6/acc2interpro-Jul2019X.abin.zip"
                 }
             }
         },
@@ -241,6 +294,10 @@
                 "skip_trimming": {
                     "type": "boolean",
                     "description": "Skips trimming of read files"
+                },
+                "skip_bbmap": {
+                    "type": "boolean",
+                    "description": "Skips quantifying with bbmap"
                 }
             }
         }
@@ -250,7 +307,10 @@
             "$ref": "#/definitions/input_output_options"
         },
         {
-            "$ref": "#/definitions/reference_genome_options"
+            "$ref": "#/definitions/processing_options"
+        },
+        {
+            "$ref": "#/definitions/reference_database_options"
         },
         {
             "$ref": "#/definitions/generic_options"
@@ -264,5 +324,12 @@
         {
             "$ref": "#/definitions/skipping_steps"
         }
-    ]
+    ],
+    "properties": {
+        "input_paths": {
+            "type": "string",
+            "description": "Only for testing",
+            "hidden": true
+        }
+    }
 }

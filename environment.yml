@@ -5,22 +5,27 @@ channels:
   - bioconda
   - defaults
   - conda-forge
+  - agbiome
 dependencies:
-  - python>=3.8.5
-  - markdown>=3.3.3
-  - pymdown-extensions>=8.1.1
-  - pygments>=2.7.4
-  - fastqc>=0.11.9
-  - multiqc>=1.9
-  - r-markdown>=0.9
-  - r-base>=3.6.1
-  - pigz>=2.4
-  - trinity>=2.9.1
-  - trinotate>=3.2.1
-  - transdecoder>=5.5
-  - megahit>=1.2.9
-  - diamond>=2.0.6
-  - megan>=6.12.3
-  - cutadapt>=3.2
-  - trim-galore>=0.6.6
-  - prodigal>=2.6.3
+  - python=3.7.9
+  - markdown=3.3.3
+  - pymdown-extensions=8.1.1
+  - pygments=2.7.4
+  - fastqc=0.11.9
+  - multiqc=1.9
+  - r-markdown=0.9
+  - r-base=3.6.1
+  - cutadapt=3.2
+  - trim-galore=0.6.6
+  - pigz=2.4
+  - trinity=2.9.1
+  - transdecoder=5.5
+  - megahit=1.2.9
+  - diamond=2.0.7
+  - megan=6.12.3
+  - prokka=1.14.6
+  - blast=2.10.1
+  - unzip=6.0
+  - bbtools=37.62
+  - samtools=1.11
+  - subread=2.0.1

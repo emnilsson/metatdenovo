@@ -7,4 +7,5 @@ chdir $ROOT/docs
 screen -t docs
 chdir $ROOT
 screen -t man
+screen -t console
 screen -t root
