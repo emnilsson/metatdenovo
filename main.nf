@@ -272,27 +272,28 @@ process output_documentation {
 /*
  * STEP 4 - Remove rRNA-sequences
  */
-process remove_rrna {
-    label 'process_medium'
-    tag "$name"
-
-    publishDir("${params.outdir}/remove_rrna_logs/", mode: "copy", pattern: "*.bbduk.log")
-
-    input:
-        tuple name, file(reads) from ch_read_files_remove_rrna
-
-    output:
-        tuple name, file("bbduk/*.fastq.gz") into ch_read_files_trimming
-
-    """
-    bbduk.sh in1=${reads[0]} in2=${reads[1]} out1=bbduk/${reads[0]} out2=bbduk/${reads[1]} ref=$params.rrnafasta k=31 2>&1 > ${name}.bbduk.log
-    """
-}
-
-/*
- * STEP 4 - Trimming
- */
 if ( ! params.skip_trimming ) {
+    process remove_rrna {
+        label 'process_medium'
+        tag "$name"
+
+        publishDir("${params.outdir}/remove_rrna_logs/", mode: "copy", pattern: "*.bbduk.log")
+
+        input:
+            tuple name, file(reads) from ch_read_files_remove_rrna
+            file reference from Channel.fromPath("$params.rrnafasta")
+
+        output:
+            tuple name, file("bbduk/*.fastq.gz") into ch_read_files_trimming
+
+        """
+        bbduk.sh in1=${reads[0]} in2=${reads[1]} out1=bbduk/${reads[0]} out2=bbduk/${reads[1]} ref=$reference k=31 2>&1 > ${name}.bbduk.log
+        """
+    }
+
+    /*
+     * STEP 4 - Trimming
+     */
     process trim_galore {
         label 'process_medium'
         tag "$name"
@@ -324,7 +325,7 @@ else {
         tag "$name"
 
         input:
-            tuple name, file(reads) from ch_read_files_trimming
+            tuple name, file(reads) from ch_read_files_remove_rrna
 
         output:
             file("*_R1_untrimmed.fastq.gz") into (trimmed_fwdreads_megahit, trimmed_fwdreads_rnaspades, trimmed_fwdreads_trinity)
