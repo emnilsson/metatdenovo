@@ -29,3 +29,11 @@ dependencies:
   - bbtools=37.62
   - samtools=1.11
   - subread=2.0.1
+  - r-optparse=1.6.2
+  - r-data.table=1.14.0
+  - r-dtplyr=1.1.0
+  - r-dplyr=1.0.4
+  - r-stringr=1.4.0
+  - r-r.utils=2.8.0
+  - r-tidyr=0.8.3
+  - spades=3.14.1

@@ -32,6 +32,11 @@
                     "default": "./results",
                     "fa_icon": "fas fa-folder-open"
                 },
+                "assembly": {
+                    "type": "string",
+                    "description": "Fasta file, gzipped or not, with contigs from prior assembly.",
+                    "default": ""
+                },
                 "email": {
                     "type": "string",
                     "description": "Email address for completion summary.",
@@ -49,8 +54,8 @@
             "properties": {
                 "assembler": {
                     "type": "string",
-                    "description": "Which assembly program to use: megahit or trinity.",
-                    "help_text": "Set this parameter to either 'megahit' or 'trinity'."
+                    "description": "Which assembly program to use: megahit, rnaspades or trinity.",
+                    "help_text": "Set this parameter to either 'megahit', 'rnaspades' or 'trinity'."
                 },
                 "annotator": {
                     "type": "string",
@@ -69,6 +74,11 @@
                 "bbmap": {
                     "type": "boolean",
                     "description": "UseBBMap to quantify ORs over samples",
+                    "default": true
+                },
+                "summary": {
+                    "type": "boolean",
+                    "description": "Create summary tables for abundances, annotations etc. Will download NCBI's taxonomy, unless you specify --ncbitaxonomy.",
                     "default": true
                 }
             }
@@ -115,6 +125,31 @@
                     "type": "string",
                     "description": "Mapping file for Interpro2GO for MEGAN. (Old, pre ~6.20 style.)",
                     "default": "https://software-ab.informatik.uni-tuebingen.de/download/megan6/acc2interpro-Jul2019X.abin.zip"
+                },
+                "ncbitaxonomy": {
+                    "type": "string",
+                    "description": "'Flat', i.e. columns for well-known ranks, NCBI taxonomy in a tsv file. Need to have a header with field names including a tax_id field.",
+                    "help_text": ""
+                },
+                "ncbitaxonomy_targz": {
+                    "type": "string",
+                    "description": "NCBI's 'taxdump.tar.gz'. Default 'https://ftp.ncbi.nlm.nih.gov/pub/taxonomy/taxdump.tar.gz'.",
+                    "help_text": ""
+                },
+                "gtdb_taxonomy": {
+                    "type": "string",
+                    "description": "TSV file with GTDB taxonomy for both Archaea and Bacteria, including ncbi_taxid.",
+                    "help_text": ""
+                },
+                "gtdb_archaea_metadata_targz": {
+                    "type": "string",
+                    "description": "GTDB's metadata tar ball for Archaea. Default 'https://data.gtdb.ecogenomic.org/releases/latest/ar122_metadata.tar.gz'.",
+                    "help_text": ""
+                },
+                "gtdb_bacteria_metadata_targz": {
+                    "type": "string",
+                    "description": "GTDB's metadata tar ball for Bacteria. Default 'https://data.gtdb.ecogenomic.org/releases/latest/bac120_metadata.tar.gz'.",
+                    "help_text": ""
                 }
             }
         },

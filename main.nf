@@ -23,11 +23,11 @@ if (params.help) {
 params.outdir = 'results/'
 
 // Assembly program
-ASSEMBLERS = [ megahit: true, trinity: true ]
-params.assembler = '' // Set to megahit or trinity to be meaningful
+ASSEMBLERS = [ megahit: true, rnaspades: true, trinity: true ]
+params.assembler = '' // Set to megahit, rnaspades or trinity to be meaningful
 
 // Modify when we start to support starting from an already finished assembly
-if ( ! ASSEMBLERS[params.assembler.toLowerCase()] ) {
+if ( ! params.assembly && ! ASSEMBLERS[params.assembler.toLowerCase()] ) {
     println "You must choose a supported assembly program: ${ASSEMBLERS.keySet().join(', ')}"
     exit 1
 }
@@ -84,19 +84,19 @@ if (params.input_paths) {
             .from(params.input_paths)
             .map { row -> [ row[0], [ file(row[1][0], checkIfExists: true) ] ] }
             .ifEmpty { exit 1, "params.input_paths was empty - no input files supplied" }
-            .into { ch_read_files_fastqc; ch_read_files_remove_rrna; ch_read_files_bbmap }
+            .into { ch_read_files_fastqc; ch_read_files_remove_rrna }
     } else {
         Channel
             .from(params.input_paths)
             .map { row -> [ row[0], [ file(row[1][0], checkIfExists: true), file(row[1][1], checkIfExists: true) ] ] }
             .ifEmpty { exit 1, "params.input_paths was empty - no input files supplied" }
-            .into { ch_read_files_fastqc; ch_read_files_remove_rrna; ch_read_files_bbmap }
+            .into { ch_read_files_fastqc; ch_read_files_remove_rrna }
     }
 } else {
     Channel
         .fromFilePairs(params.input, size: params.single_end ? 1 : 2)
         .ifEmpty { exit 1, "Cannot find any reads matching: ${params.input}\nNB: Path needs to be enclosed in quotes!\nIf this is single-end data, please specify --single_end on the command line." }
-        .into { ch_read_files_fastqc; ch_read_files_trimming; ch_read_files_bbmap }
+        .into { ch_read_files_fastqc; ch_read_files_trimming }
 }
 
 // Header log info
@@ -166,7 +166,6 @@ process get_software_versions {
         file 'software_versions_mqc.yaml' into ch_software_versions_yaml
         file "software_versions.csv"
 
-    // TODO: Fill in prokka, eggnog-mapper and ...
     script:
         """
         echo $workflow.manifest.version > v_pipeline.txt
@@ -176,7 +175,14 @@ process get_software_versions {
         cutadapt --version > v_cutadapt.txt
         trim_galore --version | grep version > v_trim_galore.txt
         megahit --version > v_megahit.txt
+        rnaspades.py -v > v_rnaspades.txt
         grep "my \\+\\\$VERSION" \$(which Trinity) |grep -v "#"|sed 's/.*"\\(.*\\)"; */\\1/' > v_trinity.txt
+        prokka -v 2> v_prokka.txt
+        TransDecoder.LongOrfs --version > v_transdecoder.txt
+        diamond version > v_diamond.txt
+        grep 'Last modified' \$(which bbmap.sh) > v_bbmap.txt
+        featureCounts -v 2>&1|grep feature > v_featureCounts.txt
+        R --version|grep '^R version' > v_R.txt
         scrape_software_versions.py &> software_versions_mqc.yaml
         """
 }
@@ -297,8 +303,9 @@ if ( ! params.skip_trimming ) {
             tuple name, file(reads) from ch_read_files_trimming
 
         output:
-            file("*_1.fq.gz") into (trimmed_fwdreads_megahit, trimmed_fwdreads_trinity)
-            file("*_2.fq.gz") into (trimmed_revreads_megahit, trimmed_revreads_trinity)
+            file("*_1.fq.gz") into (trimmed_fwdreads_megahit, trimmed_fwdreads_rnaspades, trimmed_fwdreads_trinity)
+            file("*_2.fq.gz") into (trimmed_revreads_megahit, trimmed_revreads_rnaspades, trimmed_revreads_trinity)
+            tuple name, '*.fq.gz' into ch_read_files_bbmap
             tuple val(name), file("*.trim_galore.log") into trimming_logs
 
         // TODO: Check how to best get this into fastqc/multiqc
@@ -320,8 +327,9 @@ else {
             tuple name, file(reads) from ch_read_files_trimming
 
         output:
-            file("*_R1_untrimmed.fastq.gz") into (trimmed_fwdreads_megahit, trimmed_fwdreads_trinity)
-            file("*_R2_untrimmed.fastq.gz") into (trimmed_revreads_megahit, trimmed_revreads_trinity)
+            file("*_R1_untrimmed.fastq.gz") into (trimmed_fwdreads_megahit, trimmed_fwdreads_rnaspades, trimmed_fwdreads_trinity)
+            file("*_R2_untrimmed.fastq.gz") into (trimmed_revreads_megahit, trimmed_revreads_rnaspades, trimmed_revreads_trinity)
+            tuple name, '*.fastq.gz' into ch_read_files_bbmap
 
         """
         mv ${reads[0]} ${name}._R1_untrimmed.fastq.gz
@@ -331,9 +339,38 @@ else {
 }
 
 /*
- * STEP 5a - Megahit assembly
+ * STEP 5a: Make sure a user provided assembly file is gzipped. (Downstream steps require that.)
  */
-if ( params.assembler.toLowerCase() == 'megahit' ) {
+if ( params.assembly ) {
+    ch_assembly = Channel.fromPath(params.assembly, checkIfExists: true)
+
+    process gzip_assembly {
+        label 'process_medium'
+
+        input:
+            path assembly from ch_assembly
+
+        output:
+            path('*.gz', includeInputs: true) into ch_contigs_transdecoder
+            path('*.gz', includeInputs: true) into ch_contigs_prokka
+            path('*.gz', includeInputs: true) into ch_contigs_bbmap
+
+        script:
+            if ( assembly.getExtension() != 'gz' )
+                """
+                pigz -cp $task.cpus $assembly > $assembly.gz
+                """
+            else
+                """
+                echo done
+                """
+    }
+}
+
+/*
+ * STEP 5b: Megahit assembly
+ */
+else if ( params.assembler.toLowerCase() == 'megahit' ) {
     process megahit {
         label 'process_high'
         publishDir("${params.outdir}/megahit", mode: "copy")
@@ -343,8 +380,8 @@ if ( params.assembler.toLowerCase() == 'megahit' ) {
             file(revreads) from trimmed_revreads_megahit.collect()
 
         output:
-            file "megahit.final.contigs.fna.gz" into ch_transdecoder
-            file "megahit.final.contigs.fna.gz" into ch_prokka
+            file "megahit.final.contigs.fna.gz" into ch_contigs_transdecoder
+            file "megahit.final.contigs.fna.gz" into ch_contigs_prokka
             file "megahit.final.contigs.fna.gz" into ch_contigs_bbmap
             file "megahit.log"
             file "megahit.tar.gz"
@@ -360,9 +397,37 @@ if ( params.assembler.toLowerCase() == 'megahit' ) {
 }
 
 /*
- * STEP 5b - Trinity assembly
+ * STEP 5c: rnaSPADES assembly
  */
-if ( params.assembler.toLowerCase() == 'trinity' ) {
+else if ( params.assembler.toLowerCase() == 'rnaspades' ) {
+    process rnaspades {
+        label 'process_high'
+        publishDir("${params.outdir}/rnaspades", mode: "copy")
+
+        input:
+            file(fwdreads) from trimmed_fwdreads_rnaspades.collect()
+            file(revreads) from trimmed_revreads_rnaspades.collect()
+
+        output:
+            file "rnaspades.transcripts.fna.gz" into ch_contigs_transdecoder
+            file "rnaspades.transcripts.fna.gz" into ch_contigs_prokka
+            file "rnaspades.transcripts.fna.gz" into ch_contigs_bbmap
+            file "rnaspades.log"
+            file "rnaspades.tar.gz"
+
+        script:
+            """
+            rnaspades.py -t ${task.cpus} -m ${task.memory.toGiga()} ${fwdreads.toSorted().withIndex().collect { item, index -> "--pe-1 ${index} $item"}.join(' ')} ${revreads.toSorted().withIndex().collect { item, index -> "--pe-2 ${index} $item"}.join(' ')} -o rnaspades_out > rnaspades.log 2>&1
+            sed 's/\\(>NODE_[0-9]*\\).*/\\1/' rnaspades_out/transcripts.fasta | pigz -cp ${task.cpus} > rnaspades.transcripts.fna.gz
+            tar cfz rnaspades.tar.gz rnaspades_out/
+            """
+    }
+}
+
+/*
+ * STEP 5d: Trinity assembly
+ */
+else if ( params.assembler.toLowerCase() == 'trinity' ) {
     process trinity {
         label 'process_high'
         publishDir("${params.outdir}/trinity", mode: "copy")
@@ -372,8 +437,8 @@ if ( params.assembler.toLowerCase() == 'trinity' ) {
             file(revreads) from trimmed_revreads_trinity.collect()
 
         output:
-            file "trinity.final.contigs.fna.gz" into ch_transdecoder
-            file "trinity.final.contigs.fna.gz" into ch_prokka
+            file "trinity.final.contigs.fna.gz" into ch_contigs_transdecoder
+            file "trinity.final.contigs.fna.gz" into ch_contigs_prokka
             file "trinity.final.contigs.fna.gz" into ch_contigs_bbmap
             file "trinity.log"
             file "trinity.tar.gz"
@@ -399,7 +464,7 @@ if ( params.annotator.toLowerCase() == 'prokka' ) {
         publishDir("${params.outdir}", mode: "copy")
 
         input:
-            file contigs from ch_prokka
+            file contigs from ch_contigs_prokka
 
         output:
             file 'prokka/*.err.gz'
@@ -436,7 +501,7 @@ if ( params.annotator.toLowerCase() == 'trinotate' ) {
         publishDir("${params.outdir}/trinotate", mode: "copy")
 
         input:
-            file contigs from ch_transdecoder
+            file contigs from ch_contigs_transdecoder
 
         output:
             file '*.transdecoder.faa.gz'  into ch_emapper
@@ -496,7 +561,7 @@ if ( params.emapper ) {
 
         output:
             file 'emapper.out'
-            file '*.emapper.annotations'
+            file '*.emapper.annotations'    into ch_emapper_annots
             file '*.emapper.seed_orthologs'
 
         script:
@@ -512,9 +577,37 @@ if ( params.emapper ) {
  * STEP 7 - Taxonomic annotation with Diamond/RefSeq and MEGAN.
  */
 if ( params.megan_taxonomy ) {
-    if ( ! params.refseq_dmnd && params.refseq_faa ) {
+
+    // Prioritize using user provided Diamond Refseq database in dmnd format
+    if ( params.refseq_dmnd ) {
+        ch_refseq_dmnd = Channel.fromPath(params.refseq_dmnd,  checkIfExists: true)
+        ch_refseq_faa = Channel.empty()
+    } 
+    // Second best, user provide faa file
+    else if ( params.refseq_faa ) {
         ch_refseq_faa  = Channel.fromPath(params.refseq_faa, checkIfExists: true)
 
+    } 
+    // Last resort: Download Refseq
+    else {
+        process download_refseq {
+            label 'process_long'
+            publishDir("${params.outdir}/refseq", mode: "copy")
+
+            output:
+                path 'refseq_protein.faa' into ch_refseq_faa
+
+            script:
+                """
+                wget -A "refseq_protein.*.tar.gz" --mirror ftp://ftp.ncbi.nih.gov/blast/db
+                ( cd ftp.ncbi.nih.gov/blast/db; for f in refseq_protein.*.tar.gz; do echo "--> untarring \$f <--"; tar xzf \$f; done )
+                blastdbcmd -db ftp.ncbi.nih.gov/blast/db/refseq_protein -entry all -dbtype prot -out refseq_protein.faa
+                """
+        }
+    }
+
+    if ( ! params.refseq_dmnd ) {
+        // Format a fasta file to Diamond dmnd
         process refseq_dmnd {
             label 'process_medium'
             publishDir("${params.outdir}/refseq", mode: "copy")
@@ -541,25 +634,6 @@ if ( params.megan_taxonomy ) {
                     diamond makedb --in $refseq_faa -d refseq_protein --threads $task.cpus
                     """
                 }
-        }
-    } 
-    else if ( params.refseq_dmnd ) {
-        ch_refseq_dmnd = Channel.fromPath(params.refseq_dmnd,  checkIfExists: true)
-    } 
-    else if ( ! params.refseq_faa ) {
-        process download_refseq {
-            label 'process_long'
-            publishDir("${params.outdir}/refseq", mode: "copy")
-
-            output:
-                path 'refseq_protein.faa' into ch_refseq_faa
-
-            script:
-                """
-                wget -A "refseq_protein.*.tar.gz" --mirror ftp://ftp.ncbi.nih.gov/blast/db
-                ( cd ftp.ncbi.nih.gov/blast/db; for f in refseq_protein.*.tar.gz; do echo "--> untarring \$f <--"; tar xzf \$f; done )
-                blastdbcmd -db ftp.ncbi.nih.gov/blast/db/refseq_protein -entry all -dbtype prot -out refseq_protein.faa
-                """
         }
     }
 
@@ -595,6 +669,7 @@ if ( params.megan_taxonomy ) {
             file daa into ch_meganized_daa
 
         script:
+            // This will clearly break when Megan is updated
             unzip  = ( acc2taxa.getExtension()        == 'zip' ) ? "unzip $acc2taxa" : ""
             unzip += ( acc2eggnog.getExtension()      == 'zip' ) ? "; unzip $acc2eggnog" : ""
             unzip += ( acc2interpro2go.getExtension() == 'zip' ) ? "; unzip $acc2interpro2go" : ""
@@ -618,8 +693,11 @@ if ( params.megan_taxonomy ) {
 
         output:
             file '*.tsv.gz'
+            path '*.reads2taxonids.tsv.gz' into ch_megan_taxonomy_ncbi
+            path '*.reads2taxonids.tsv.gz' into ch_megan_taxonomy_gtdb
 
         script:
+            // This will clearly break when Megan is updated
             """
             /opt/conda/envs/nf-core-metatdenovo-1.0dev/opt/megan-6.12.3/tools/daa2info -i $daa -r2c Taxonomy    | gzip -c > ${daa.toString() - '.daa'}.reads2taxonids.tsv.gz
             /opt/conda/envs/nf-core-metatdenovo-1.0dev/opt/megan-6.12.3/tools/daa2info -i $daa -r2c EGGNOG      | gzip -c > ${daa.toString() - '.daa'}.reads2eggnogs.tsv.gz
@@ -651,7 +729,7 @@ process bbmap {
     script:
         // The trimreaddescriptions=t is required by featureCount
         """
-        bbmap.sh trimreaddescriptions=t unpigz=t threads=$task.cpus nodisk=t ref=$contigs in=${reads[0]} in2=${reads[1]} out=stdout 2>${name}.bbmap.out | samtools view -Sb | samtools sort > ${name}.bbmap.bam
+        bbmap.sh -Xmx${task.memory.getGiga()}g trimreaddescriptions=t unpigz=t threads=$task.cpus nodisk=t ref=$contigs in=${reads[0]} in2=${reads[1]} out=stdout 2>${name}.bbmap.out | samtools view -Sb | samtools sort > ${name}.bbmap.bam
         """
 }
 
@@ -668,7 +746,7 @@ process bbmap_feature_count {
         path bams from ch_bbmap_bam.collect()
 
     output:
-        path 'bbmap.fc.CDS.tsv.gz'
+        path 'bbmap.fc.CDS.tsv.gz' into ch_bbmap_fc
         path 'bbmap.fc.out'
 
     script:
@@ -677,6 +755,181 @@ process bbmap_feature_count {
         featureCounts -T $task.cpus -t CDS -g $id -a ${gff.baseName} $bams -o bbmap.fc.CDS.tsv 2>&1 > bbmap.fc.out
         pigz -p $task.cpus bbmap.fc.CDS.tsv
         """
+}
+
+/*
+ * STEP 9 - make summary tables
+ */
+
+if ( params.summary ) {
+    if ( params.bbmap ) {
+        process sum_bbmap_counts {
+            label 'process_medium'
+            publishDir("${params.outdir}/summary", mode: "copy")
+
+            input:
+                path bbmapfc from ch_bbmap_fc
+
+            output:
+                path 'bbmap_counts.tsv.gz'
+
+            script:
+                """
+                #!/usr/bin/env Rscript
+                library(data.table)
+                library(dtplyr)
+                library(dplyr, warn.conflicts = FALSE)
+                setDTthreads($task.cpus)
+                fread('$bbmapfc') %>%
+                    melt(measure.vars = 7:ncol(.), variable.name = 'sample', value.name = 'count') %>% lazy_dt() %>%
+                    mutate(sample = stringr::str_remove(sample, '.bbmap.bam'), r = count/Length) %>%
+                    group_by(sample) %>% mutate(tpm = r/sum(r) * 1e6) %>% ungroup() %>%
+                    select(-r) %>% as.data.table() %>%
+                    fwrite('bbmap_counts.tsv.gz', sep = '\t', row.names = FALSE)
+                """
+        }
+    }
+
+    if ( params.megan_taxonomy ) {
+        if ( params.ncbitaxonomy ) {
+            ch_ncbi_taxonomy = Channel.fromPath(params.ncbitaxonomy)
+        }
+        else {
+            ch_ncbitax_tar = Channel.fromPath(params.ncbitaxonomy_targz)
+
+            process create_ncbi_taxonomy {
+                label 'process_medium'
+                publishDir("${params.outdir}/ncbi_taxonomy", mode: "copy")
+
+                input:
+                    path taxtar from ch_ncbitax_tar
+
+                output:
+                    path 'ncbi_taxonomy.tsv.gz' into ch_ncbi_taxonomy
+
+                script:
+                    """
+                    tar xzf $taxtar
+                    make_taxflat.R nodes.dmp names.dmp ncbi_taxonomy.tsv.gz
+                    """
+            }
+        }
+        process megan_ncbi_full_taxonomy {
+            label 'process_low'
+            publishDir("${params.outdir}/summary", mode: "copy")
+
+            input:
+                path megantaxa from ch_megan_taxonomy_ncbi
+                path ncbi_taxflat from ch_ncbi_taxonomy
+
+            output:
+                path 'megan_refseq_ncbi_taxonomy.tsv.gz'
+
+            script:
+                """
+                #!/usr/bin/env Rscript
+                library(data.table)
+                library(dtplyr)
+                library(dplyr, warn.conflicts = FALSE)
+                setDTthreads($task.cpus)
+                fread('$megantaxa', col.names = c('orf', 'tax_id')) %>% lazy_dt() %>%
+                  left_join(fread('$ncbi_taxflat') %>% lazy_dt(), by = 'tax_id') %>%
+                  as.data.table() %>%
+                  fwrite('megan_refseq_ncbi_taxonomy.tsv.gz', sep = '\t', row.names = FALSE)
+                """
+        }
+
+        if ( params.gtdb_taxonomy ) {
+            ch_gtdb_taxonomy = Channel.fromPath(params.gtdb_taxonomy)
+        }
+        else {
+            ch_arctar = Channel.fromPath(params.gtdb_archaea_metadata_targz)
+            ch_bactar = Channel.fromPath(params.gtdb_bacteria_metadata_targz)
+
+            process gtdb_taxtable {
+                label 'process_low'
+                publishDir("${params.outdir}/gtdb", mode: "copy")
+
+                input:
+                    path arctar from ch_arctar
+                    path bactar from ch_bactar
+
+                output:
+                    path 'gtdb_taxonomy.tsv.gz' into ch_gtdb_taxonomy
+
+                script:
+                    """
+                    #!/usr/bin/env Rscript
+                    library(data.table)
+                    library(dplyr, warn.conflicts = FALSE)
+                    setDTthreads($task.cpus)
+                    # Read and stack the archeal and bacterial metadata tables,
+                    funion(
+                      fread(cmd = 'tar xzOf $arctar', colClasses = c('character')),
+                      fread(cmd = 'tar xzOf $bactar', colClasses = c('character'))
+                    ) %>% 
+                        as_tibble() %>%
+                        # keep only the interesting fields, and remove leading rank letters from the taxonomy string
+                        transmute(gtdb_accession = accession, gtdb_taxonomy = stringr::str_remove_all(gtdb_taxonomy, '[a-z]__'), ncbi_taxid) %>%
+                        # separate the taxonomy string into one field per rank
+                        tidyr::separate(gtdb_taxonomy, c('gtdb_domain', 'gtdb_phylum', 'gtdb_class', 'gtdb_order', 'gtdb_family', 'gtdb_genus', 'gtdb_species'), sep = ';') %>%
+                        fwrite('gtdb_taxonomy.tsv.gz', sep = '\t', row.names = FALSE)
+                    """
+            }
+        }
+
+        process gtdb_taxonomy {
+            label 'process_low'
+            publishDir("${params.outdir}/summary", mode: "copy")
+
+            input:
+                path gtdbtax from ch_gtdb_taxonomy
+                path megantaxa from ch_megan_taxonomy_gtdb
+
+            output:
+                path 'megan_refseq_gtdb_taxonomy.tsv.gz'
+
+            script:
+                """
+                #!/usr/bin/env Rscript
+                library(data.table)
+                library(dtplyr)
+                library(dplyr, warn.conflicts = FALSE)
+                setDTthreads($task.cpus)
+                fread('$megantaxa', col.names = c('orf', 'tax_id')) %>% lazy_dt() %>%
+                  left_join(fread('$gtdbtax') %>% lazy_dt() %>% mutate(ncbi_taxid = as.integer(ncbi_taxid)), by = c('tax_id' = 'ncbi_taxid')) %>%
+                  rename(ncbi_tax_id = tax_id) %>%
+                  as.data.table() %>%
+                  fwrite('megan_refseq_gtdb_taxonomy.tsv.gz', sep = '\t', row.names = FALSE)
+                """
+        }
+    }
+
+    if ( params.emapper ) {
+        process format_emapper_annots {
+            label 'process_low'
+            publishDir("${params.outdir}/summary", mode: "copy")
+
+            input:
+                path emapperannots from ch_emapper_annots
+
+            output:
+                path 'eggnog_annotations.tsv.gz'
+
+            script:
+                """
+                #!/usr/bin/env Rscript
+                library(data.table)
+                library(dtplyr)
+                library(dplyr, warn.conflicts = FALSE)
+                setDTthreads($task.cpus)
+                fread(cmd = "sed 's/^#//' $emapperannots") %>% lazy_dt() %>%
+                    rename(orf = query_name) %>%
+                    as.data.table() %>%
+                    fwrite('eggnog_annotations.tsv.gz', sep = '\t', row.names = FALSE)
+                """
+        }
+    }
 }
 
 /*
