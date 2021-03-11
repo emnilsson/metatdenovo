@@ -276,7 +276,7 @@ process remove_rrna {
         tuple name, file(reads) from ch_read_files_remove_rrna
 
     output:
-        file("bbduk/*.fastq.gz") into ch_read_files_trimming
+        tuple name, file("bbduk/*.fastq.gz") into ch_read_files_trimming
 
     """
     bbduk.sh in1=${reads[0]} in2=${reads[1]} out1=bbduk/${reads[0]} out2=bbduk/${reads[1]} ref=$params.rrnafasta k=31 2>&1 > ${name}.bbduk.log
